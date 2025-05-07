@@ -282,7 +282,6 @@ func TestCustomerRepository_Update(t *testing.T) {
 			sqlmock.AnyArg(), // CreatedAt
 			sqlmock.AnyArg(), // UpdatedAt
 			sqlmock.AnyArg(), // DeletedAt
-			customer.CustomerID,
 			customer.StoreID,
 			customer.FirstName,
 			customer.LastName,
@@ -297,6 +296,7 @@ func TestCustomerRepository_Update(t *testing.T) {
 			customer.Active,
 			customer.CreateDate,
 			customer.ID,
+			customer.CustomerID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -326,10 +326,11 @@ func TestCustomerRepository_Delete(t *testing.T) {
 
 	// Expect the DELETE query (soft delete)
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `customer` SET")).
+	mock.ExpectExec("UPDATE").
 		WithArgs(
 			sqlmock.AnyArg(), // DeletedAt
 			customer.ID,
+			customer.CustomerID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
