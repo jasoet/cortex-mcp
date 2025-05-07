@@ -56,7 +56,6 @@ func TestPaymentRepository_Create(t *testing.T) {
 			sqlmock.AnyArg(), // CreatedAt
 			sqlmock.AnyArg(), // UpdatedAt
 			sqlmock.AnyArg(), // DeletedAt
-			payment.PaymentID,
 			payment.CustomerID,
 			payment.StaffID,
 			payment.RentalID,
@@ -105,8 +104,8 @@ func TestPaymentRepository_FindByID(t *testing.T) {
 			expectedPayment.RentalID, expectedPayment.Amount, expectedPayment.PaymentDate,
 		)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE `payment`.`id` = ? AND `payment`.`deleted_at` IS NULL ORDER BY `payment`.`id` LIMIT 1")).
-		WithArgs(1).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE `payment`.`id` = ? AND `payment`.`deleted_at` IS NULL ORDER BY `payment`.`id` LIMIT ?")).
+		WithArgs(1, 1).
 		WillReturnRows(rows)
 
 	payment, err := repo.FindByID(context.Background(), 1)
@@ -241,13 +240,13 @@ func TestPaymentRepository_Update(t *testing.T) {
 			sqlmock.AnyArg(), // CreatedAt
 			sqlmock.AnyArg(), // UpdatedAt
 			sqlmock.AnyArg(), // DeletedAt
-			payment.PaymentID,
 			payment.CustomerID,
 			payment.StaffID,
 			payment.RentalID,
 			payment.Amount,
 			payment.PaymentDate,
 			payment.ID,
+			payment.PaymentID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -276,10 +275,11 @@ func TestPaymentRepository_Delete(t *testing.T) {
 
 	// Expect the DELETE query (soft delete)
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `payment` SET")).
+	mock.ExpectExec("UPDATE").
 		WithArgs(
 			sqlmock.AnyArg(), // DeletedAt
 			payment.ID,
+			payment.PaymentID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -300,7 +300,7 @@ func TestPaymentRepository_DeleteByID(t *testing.T) {
 
 	// Expect the DELETE query (soft delete)
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `payment` SET")).
+	mock.ExpectExec("UPDATE").
 		WithArgs(
 			sqlmock.AnyArg(), // DeletedAt
 			1,                // ID
@@ -485,8 +485,8 @@ func TestPaymentRepository_FindByRental(t *testing.T) {
 			expectedPayment.RentalID, expectedPayment.Amount, expectedPayment.PaymentDate,
 		)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE rental_id = ? AND `payment`.`deleted_at` IS NULL ORDER BY `payment`.`id` LIMIT 1")).
-		WithArgs(uint(1)).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE rental_id = ? AND `payment`.`deleted_at` IS NULL ORDER BY `payment`.`id` LIMIT ?")).
+		WithArgs(uint(1), 1).
 		WillReturnRows(rows)
 
 	payment, err := repo.FindByRental(context.Background(), 1)
@@ -552,7 +552,7 @@ func TestPaymentRepository_FindByDateRange(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE payment_date BETWEEN ? AND ? AND `payment`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE (payment_date BETWEEN ? AND ?) AND `payment`.`deleted_at` IS NULL")).
 		WithArgs(startDate, endDate).
 		WillReturnRows(rows)
 
@@ -619,7 +619,7 @@ func TestPaymentRepository_FindByAmountRange(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE amount BETWEEN ? AND ? AND `payment`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE (amount BETWEEN ? AND ?) AND `payment`.`deleted_at` IS NULL")).
 		WithArgs(minAmount, maxAmount).
 		WillReturnRows(rows)
 
@@ -688,6 +688,25 @@ func TestPaymentRepository_GetTotalPaymentsByStore(t *testing.T) {
 
 	if total != expectedTotal {
 		t.Errorf("Expected total %f, got %f", expectedTotal, total)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
+	}
+}
+
+func TestPaymentRepository_FindByID_NotFound(t *testing.T) {
+	_, mock, repo, cleanup := setupPaymentTest(t)
+	defer cleanup()
+
+	// Expect the SELECT query with no results
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `payment` WHERE `payment`.`id` = ? AND `payment`.`deleted_at` IS NULL ORDER BY `payment`.`id` LIMIT ?")).
+		WithArgs(999, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := repo.FindByID(context.Background(), 999)
+	if err == nil {
+		t.Error("Expected error when payment not found, got nil")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
