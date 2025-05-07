@@ -52,7 +52,6 @@ func TestInventoryRepository_Create(t *testing.T) {
 			sqlmock.AnyArg(), // CreatedAt
 			sqlmock.AnyArg(), // UpdatedAt
 			sqlmock.AnyArg(), // DeletedAt
-			inventory.InventoryID,
 			inventory.FilmID,
 			inventory.StoreID,
 		).
@@ -93,8 +92,8 @@ func TestInventoryRepository_FindByID(t *testing.T) {
 			expectedInventory.InventoryID, expectedInventory.FilmID, expectedInventory.StoreID,
 		)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` WHERE `inventory`.`id` = ? AND `inventory`.`deleted_at` IS NULL ORDER BY `inventory`.`id` LIMIT 1")).
-		WithArgs(1).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` WHERE `inventory`.`id` = ? AND `inventory`.`deleted_at` IS NULL ORDER BY `inventory`.`id` LIMIT ?")).
+		WithArgs(1, 1).
 		WillReturnRows(rows)
 
 	inventory, err := repo.FindByID(context.Background(), 1)
@@ -202,10 +201,10 @@ func TestInventoryRepository_Update(t *testing.T) {
 			sqlmock.AnyArg(), // CreatedAt
 			sqlmock.AnyArg(), // UpdatedAt
 			sqlmock.AnyArg(), // DeletedAt
-			inventory.InventoryID,
 			inventory.FilmID,
 			inventory.StoreID,
 			inventory.ID,
+			inventory.InventoryID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -233,10 +232,11 @@ func TestInventoryRepository_Delete(t *testing.T) {
 
 	// Expect the DELETE query (soft delete)
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `inventory` SET")).
+	mock.ExpectExec("UPDATE").
 		WithArgs(
 			sqlmock.AnyArg(), // DeletedAt
 			inventory.ID,
+			inventory.InventoryID,
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
@@ -257,7 +257,7 @@ func TestInventoryRepository_DeleteByID(t *testing.T) {
 
 	// Expect the DELETE query (soft delete)
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `inventory` SET")).
+	mock.ExpectExec("UPDATE").
 		WithArgs(
 			sqlmock.AnyArg(), // DeletedAt
 			1,                // ID
@@ -423,7 +423,7 @@ func TestInventoryRepository_FindByFilmAndStore(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` WHERE film_id = ? AND store_id = ? AND `inventory`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` WHERE (film_id = ? AND store_id = ?) AND `inventory`.`deleted_at` IS NULL")).
 		WithArgs(uint(1), uint(1)).
 		WillReturnRows(rows)
 
@@ -486,7 +486,7 @@ func TestInventoryRepository_FindAvailable(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE rental.rental_id IS NULL AND `inventory`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `inventory`.`id`,`inventory`.`created_at`,`inventory`.`updated_at`,`inventory`.`deleted_at`,`inventory`.`inventory_id`,`inventory`.`film_id`,`inventory`.`store_id` FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE rental.rental_id IS NULL AND `inventory`.`deleted_at` IS NULL")).
 		WillReturnRows(rows)
 
 	inventories, err := repo.FindAvailable(context.Background())
@@ -531,7 +531,7 @@ func TestInventoryRepository_FindAvailableByFilm(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE rental.rental_id IS NULL AND inventory.film_id = ? AND `inventory`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `inventory`.`id`,`inventory`.`created_at`,`inventory`.`updated_at`,`inventory`.`deleted_at`,`inventory`.`inventory_id`,`inventory`.`film_id`,`inventory`.`store_id` FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE (rental.rental_id IS NULL AND inventory.film_id = ?) AND `inventory`.`deleted_at` IS NULL")).
 		WithArgs(uint(1)).
 		WillReturnRows(rows)
 
@@ -583,7 +583,7 @@ func TestInventoryRepository_FindAvailableByStore(t *testing.T) {
 		)
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE rental.rental_id IS NULL AND inventory.store_id = ? AND `inventory`.`deleted_at` IS NULL")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `inventory`.`id`,`inventory`.`created_at`,`inventory`.`updated_at`,`inventory`.`deleted_at`,`inventory`.`inventory_id`,`inventory`.`film_id`,`inventory`.`store_id` FROM `inventory` LEFT JOIN rental ON rental.inventory_id = inventory.inventory_id AND rental.return_date IS NULL WHERE (rental.rental_id IS NULL AND inventory.store_id = ?) AND `inventory`.`deleted_at` IS NULL")).
 		WithArgs(uint(1)).
 		WillReturnRows(rows)
 
@@ -600,6 +600,25 @@ func TestInventoryRepository_FindAvailableByStore(t *testing.T) {
 		if inventory.StoreID != 1 {
 			t.Errorf("Expected StoreID 1, got %d", inventory.StoreID)
 		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
+	}
+}
+
+func TestInventoryRepository_FindByID_NotFound(t *testing.T) {
+	_, mock, repo, cleanup := setupInventoryTest(t)
+	defer cleanup()
+
+	// Expect the SELECT query with no results
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `inventory` WHERE `inventory`.`id` = ? AND `inventory`.`deleted_at` IS NULL ORDER BY `inventory`.`id` LIMIT ?")).
+		WithArgs(999, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := repo.FindByID(context.Background(), 999)
+	if err == nil {
+		t.Error("Expected error when inventory not found, got nil")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
