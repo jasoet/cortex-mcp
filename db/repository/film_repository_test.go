@@ -3,338 +3,571 @@ package repository
 import (
 	"CortexMCP/db/entity"
 	"context"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-	"log"
-	"os"
+	"database/sql"
+	"regexp"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
-func setupFilmTestDB(t *testing.T) *gorm.DB {
-	// Configure logger for GORM
-	newLogger := logger.New(
-		log.New(os.Stdout, "\r\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold: time.Second,
-			LogLevel:      logger.Silent,
-			Colorful:      false,
-		},
-	)
+func setupFilmTest(t *testing.T) (*sql.DB, sqlmock.Sqlmock, FilmRepository, func()) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to open sqlmock database: %v", err)
+	}
 
-	// Connect to test database
-	// Using MySQL for testing - adjust connection string as needed
-	dsn := "root:password@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True&loc=Local"
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: newLogger,
+	dialector := mysql.New(mysql.Config{
+		Conn:                      db,
+		SkipInitializeWithVersion: true,
 	})
+
+	gormDB, err := gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
-		t.Skipf("Skipping test: Failed to connect to test database: %v", err)
-		return nil
+		t.Fatalf("Failed to open gorm database: %v", err)
 	}
 
-	// Auto migrate the schema
-	err = db.AutoMigrate(&entity.Category{}, &entity.Film{}, &entity.Actor{})
-	if err != nil {
-		t.Fatalf("Failed to migrate schema: %v", err)
-	}
+	repo := NewFilmRepository(gormDB)
 
-	// Clean up any existing data
-	db.Exec("DELETE FROM film_actors")
-	db.Exec("DELETE FROM film")
-	db.Exec("DELETE FROM category")
-	db.Exec("DELETE FROM actor")
-
-	return db
-}
-
-func createTestCategory(t *testing.T, db *gorm.DB, name string) *entity.Category {
-	category := &entity.Category{
-		Name: name,
+	return db, mock, repo, func() {
+		db.Close()
 	}
-	if err := db.Create(category).Error; err != nil {
-		t.Fatalf("Failed to create test category: %v", err)
-	}
-	return category
-}
-
-func createTestFilm(t *testing.T, db *gorm.DB, title string, releaseYear int16, length int16, categoryID uint) *entity.Film {
-	film := &entity.Film{
-		Title:       title,
-		ReleaseYear: releaseYear,
-		Length:      length,
-		CategoryID:  categoryID,
-	}
-	if err := db.Create(film).Error; err != nil {
-		t.Fatalf("Failed to create test film: %v", err)
-	}
-	return film
 }
 
 func TestFilmRepository_Create(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
-
-	// Create a test category
-	category := createTestCategory(t, db, "Action")
-
-	// Create a test film
 	film := &entity.Film{
-		Title:       "Test Film",
-		ReleaseYear: 2023,
-		Length:      120,
-		CategoryID:  category.CategoryID,
+		Title:       "The Matrix",
+		ReleaseYear: 1999,
+		Length:      136,
+		CategoryID:  1,
 	}
 
-	// Test Create method
-	err := repo.Create(ctx, film)
+	// Expect the INSERT query
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `film`")).
+		WithArgs(
+			sqlmock.AnyArg(), // CreatedAt
+			sqlmock.AnyArg(), // UpdatedAt
+			sqlmock.AnyArg(), // DeletedAt
+			film.Title,       // Title
+			film.ReleaseYear, // ReleaseYear
+			film.Length,      // Length
+			film.CategoryID,  // CategoryID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := repo.Create(context.Background(), film)
 	if err != nil {
-		t.Errorf("Failed to create film: %v", err)
+		t.Errorf("Error creating film: %v", err)
 	}
-	if film.FilmID == 0 {
-		t.Error("Expected FilmID to be non-zero after creation")
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_FindByID(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected film
+	expectedFilm := entity.Film{
+		FilmID:      1,
+		Title:       "The Matrix",
+		ReleaseYear: 1999,
+		Length:      136,
+		CategoryID:  1,
 	}
+	expectedFilm.ID = 1
+	expectedFilm.CreatedAt = time.Now()
+	expectedFilm.UpdatedAt = time.Now()
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"}).
+		AddRow(expectedFilm.ID, expectedFilm.CreatedAt, expectedFilm.UpdatedAt, nil, expectedFilm.FilmID, expectedFilm.Title, expectedFilm.ReleaseYear, expectedFilm.Length, expectedFilm.CategoryID)
 
-	// Create a test category
-	category := createTestCategory(t, db, "Comedy")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `film` WHERE `film`.`id` = ? AND `film`.`deleted_at` IS NULL ORDER BY `film`.`id` LIMIT ?")).
+		WithArgs(1, 1).
+		WillReturnRows(rows)
 
-	// Create a test film
-	film := createTestFilm(t, db, "Test Comedy", 2022, 110, category.CategoryID)
-
-	// Test FindByID method
-	found, err := repo.FindByID(ctx, film.FilmID)
+	film, err := repo.FindByID(context.Background(), 1)
 	if err != nil {
-		t.Errorf("Failed to find film by ID: %v", err)
-		return
+		t.Errorf("Error finding film: %v", err)
 	}
-	if found == nil {
-		t.Error("Expected to find film, but got nil")
-		return
+
+	if film.FilmID != expectedFilm.FilmID {
+		t.Errorf("Expected FilmID %d, got %d", expectedFilm.FilmID, film.FilmID)
 	}
-	if found.Title != film.Title {
-		t.Errorf("Expected film title %s, but got %s", film.Title, found.Title)
+
+	if film.Title != expectedFilm.Title {
+		t.Errorf("Expected Title %s, got %s", expectedFilm.Title, film.Title)
+	}
+
+	if film.ReleaseYear != expectedFilm.ReleaseYear {
+		t.Errorf("Expected ReleaseYear %d, got %d", expectedFilm.ReleaseYear, film.ReleaseYear)
+	}
+
+	if film.Length != expectedFilm.Length {
+		t.Errorf("Expected Length %d, got %d", expectedFilm.Length, film.Length)
+	}
+
+	if film.CategoryID != expectedFilm.CategoryID {
+		t.Errorf("Expected CategoryID %d, got %d", expectedFilm.CategoryID, film.CategoryID)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_FindAll(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected films
+	expectedFilms := []entity.Film{
+		{
+			FilmID:      1,
+			Title:       "The Matrix",
+			ReleaseYear: 1999,
+			Length:      136,
+			CategoryID:  1,
+		},
+		{
+			FilmID:      2,
+			Title:       "The Matrix Reloaded",
+			ReleaseYear: 2003,
+			Length:      138,
+			CategoryID:  1,
+		},
+	}
+	expectedFilms[0].ID = 1
+	expectedFilms[0].CreatedAt = time.Now()
+	expectedFilms[0].UpdatedAt = time.Now()
+	expectedFilms[1].ID = 2
+	expectedFilms[1].CreatedAt = time.Now()
+	expectedFilms[1].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"})
+	for _, film := range expectedFilms {
+		rows.AddRow(film.ID, film.CreatedAt, film.UpdatedAt, nil, film.FilmID, film.Title, film.ReleaseYear, film.Length, film.CategoryID)
 	}
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(rows)
 
-	// Create a test category
-	category := createTestCategory(t, db, "Various")
-
-	// Create test films
-	films := []*entity.Film{
-		createTestFilm(t, db, "Film 1", 2020, 100, category.CategoryID),
-		createTestFilm(t, db, "Film 2", 2021, 110, category.CategoryID),
-		createTestFilm(t, db, "Film 3", 2022, 120, category.CategoryID),
-	}
-
-	// Test FindAll method
-	found, err := repo.FindAll(ctx)
+	films, err := repo.FindAll(context.Background())
 	if err != nil {
-		t.Errorf("Failed to find all films: %v", err)
-		return
+		t.Errorf("Error finding films: %v", err)
 	}
-	if len(found) != len(films) {
-		t.Errorf("Expected to find %d films, but got %d", len(films), len(found))
+
+	if len(films) != len(expectedFilms) {
+		t.Errorf("Expected %d films, got %d", len(expectedFilms), len(films))
+	}
+
+	for i, film := range films {
+		if film.FilmID != expectedFilms[i].FilmID {
+			t.Errorf("Expected FilmID %d, got %d", expectedFilms[i].FilmID, film.FilmID)
+		}
+		if film.Title != expectedFilms[i].Title {
+			t.Errorf("Expected Title %s, got %s", expectedFilms[i].Title, film.Title)
+		}
+		if film.ReleaseYear != expectedFilms[i].ReleaseYear {
+			t.Errorf("Expected ReleaseYear %d, got %d", expectedFilms[i].ReleaseYear, film.ReleaseYear)
+		}
+		if film.Length != expectedFilms[i].Length {
+			t.Errorf("Expected Length %d, got %d", expectedFilms[i].Length, film.Length)
+		}
+		if film.CategoryID != expectedFilms[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedFilms[i].CategoryID, film.CategoryID)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_Update(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	film := &entity.Film{
+		FilmID:      1,
+		Title:       "The Matrix",
+		ReleaseYear: 1999,
+		Length:      136,
+		CategoryID:  1,
 	}
+	film.ID = 1
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	// Expect the UPDATE query
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(), // CreatedAt
+			sqlmock.AnyArg(), // UpdatedAt
+			sqlmock.AnyArg(), // DeletedAt
+			film.Title,       // Title
+			film.ReleaseYear, // ReleaseYear
+			film.Length,      // Length
+			film.CategoryID,  // CategoryID
+			film.ID,          // ID
+			film.FilmID,      // FilmID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
-	// Create a test category
-	category := createTestCategory(t, db, "Adventure")
-
-	// Create a test film
-	film := createTestFilm(t, db, "Original Title", 2020, 100, category.CategoryID)
-
-	// Update the film
-	film.Title = "Updated Title"
-	err := repo.Update(ctx, film)
+	err := repo.Update(context.Background(), film)
 	if err != nil {
-		t.Errorf("Failed to update film: %v", err)
-		return
+		t.Errorf("Error updating film: %v", err)
 	}
 
-	// Verify the update
-	found, err := repo.FindByID(ctx, film.FilmID)
-	if err != nil {
-		t.Errorf("Failed to find film by ID: %v", err)
-		return
-	}
-	if found.Title != "Updated Title" {
-		t.Errorf("Expected film title 'Updated Title', but got '%s'", found.Title)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_Delete(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	film := &entity.Film{
+		FilmID:      1,
+		Title:       "The Matrix",
+		ReleaseYear: 1999,
+		Length:      136,
+		CategoryID:  1,
 	}
+	film.ID = 1
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	// Expect the DELETE query (soft delete)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(), // DeletedAt
+			film.ID,          // ID
+			film.FilmID,      // FilmID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
-	// Create a test category
-	category := createTestCategory(t, db, "Documentary")
-
-	// Create a test film
-	film := createTestFilm(t, db, "Film to Delete", 2021, 90, category.CategoryID)
-
-	// Delete the film
-	err := repo.Delete(ctx, film)
+	err := repo.Delete(context.Background(), film)
 	if err != nil {
-		t.Errorf("Failed to delete film: %v", err)
-		return
+		t.Errorf("Error deleting film: %v", err)
 	}
 
-	// Verify the deletion
-	_, err = repo.FindByID(ctx, film.FilmID)
-	if err == nil {
-		t.Error("Expected error when finding deleted film, but got nil")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_DeleteByID(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	// Expect the DELETE query (soft delete)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(), // DeletedAt
+			1,                // ID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
-	// Create a test category
-	category := createTestCategory(t, db, "Animation")
-
-	// Create a test film
-	film := createTestFilm(t, db, "Film to Delete by ID", 2022, 95, category.CategoryID)
-
-	// Delete the film by ID
-	err := repo.DeleteByID(ctx, film.FilmID)
+	err := repo.DeleteByID(context.Background(), 1)
 	if err != nil {
-		t.Errorf("Failed to delete film by ID: %v", err)
-		return
+		t.Errorf("Error deleting film by ID: %v", err)
 	}
 
-	// Verify the deletion
-	_, err = repo.FindByID(ctx, film.FilmID)
-	if err == nil {
-		t.Error("Expected error when finding deleted film, but got nil")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_FindByTitle(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected films
+	expectedFilms := []entity.Film{
+		{
+			FilmID:      1,
+			Title:       "The Matrix",
+			ReleaseYear: 1999,
+			Length:      136,
+			CategoryID:  1,
+		},
+	}
+	expectedFilms[0].ID = 1
+	expectedFilms[0].CreatedAt = time.Now()
+	expectedFilms[0].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"})
+	for _, film := range expectedFilms {
+		rows.AddRow(film.ID, film.CreatedAt, film.UpdatedAt, nil, film.FilmID, film.Title, film.ReleaseYear, film.Length, film.CategoryID)
 	}
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WithArgs("%Matrix%").
+		WillReturnRows(rows)
 
-	// Create a test category
-	category := createTestCategory(t, db, "Mixed")
-
-	// Create test films
-	createTestFilm(t, db, "Action Movie", 2020, 100, category.CategoryID)
-	createTestFilm(t, db, "Action Adventure", 2021, 110, category.CategoryID)
-	createTestFilm(t, db, "Comedy", 2022, 120, category.CategoryID)
-
-	// Test FindByTitle method
-	found, err := repo.FindByTitle(ctx, "Action")
+	films, err := repo.FindByTitle(context.Background(), "Matrix")
 	if err != nil {
-		t.Errorf("Failed to find films by title: %v", err)
-		return
+		t.Errorf("Error finding films by title: %v", err)
 	}
-	if len(found) != 2 {
-		t.Errorf("Expected to find 2 films, but got %d", len(found))
+
+	if len(films) != len(expectedFilms) {
+		t.Errorf("Expected %d films, got %d", len(expectedFilms), len(films))
+	}
+
+	for i, film := range films {
+		if film.FilmID != expectedFilms[i].FilmID {
+			t.Errorf("Expected FilmID %d, got %d", expectedFilms[i].FilmID, film.FilmID)
+		}
+		if film.Title != expectedFilms[i].Title {
+			t.Errorf("Expected Title %s, got %s", expectedFilms[i].Title, film.Title)
+		}
+		if film.ReleaseYear != expectedFilms[i].ReleaseYear {
+			t.Errorf("Expected ReleaseYear %d, got %d", expectedFilms[i].ReleaseYear, film.ReleaseYear)
+		}
+		if film.Length != expectedFilms[i].Length {
+			t.Errorf("Expected Length %d, got %d", expectedFilms[i].Length, film.Length)
+		}
+		if film.CategoryID != expectedFilms[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedFilms[i].CategoryID, film.CategoryID)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_FindByCategory(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected films
+	expectedFilms := []entity.Film{
+		{
+			FilmID:      1,
+			Title:       "The Matrix",
+			ReleaseYear: 1999,
+			Length:      136,
+			CategoryID:  1,
+		},
+		{
+			FilmID:      2,
+			Title:       "The Matrix Reloaded",
+			ReleaseYear: 2003,
+			Length:      138,
+			CategoryID:  1,
+		},
+	}
+	expectedFilms[0].ID = 1
+	expectedFilms[0].CreatedAt = time.Now()
+	expectedFilms[0].UpdatedAt = time.Now()
+	expectedFilms[1].ID = 2
+	expectedFilms[1].CreatedAt = time.Now()
+	expectedFilms[1].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"})
+	for _, film := range expectedFilms {
+		rows.AddRow(film.ID, film.CreatedAt, film.UpdatedAt, nil, film.FilmID, film.Title, film.ReleaseYear, film.Length, film.CategoryID)
 	}
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WithArgs(1).
+		WillReturnRows(rows)
 
-	// Create test categories
-	actionCategory := createTestCategory(t, db, "Action")
-	comedyCategory := createTestCategory(t, db, "Comedy")
-
-	// Create test films
-	createTestFilm(t, db, "Action Movie 1", 2020, 100, actionCategory.CategoryID)
-	createTestFilm(t, db, "Action Movie 2", 2021, 110, actionCategory.CategoryID)
-	createTestFilm(t, db, "Comedy Movie", 2022, 120, comedyCategory.CategoryID)
-
-	// Test FindByCategory method
-	found, err := repo.FindByCategory(ctx, actionCategory.CategoryID)
+	films, err := repo.FindByCategory(context.Background(), 1)
 	if err != nil {
-		t.Errorf("Failed to find films by category: %v", err)
-		return
+		t.Errorf("Error finding films by category: %v", err)
 	}
-	if len(found) != 2 {
-		t.Errorf("Expected to find 2 films, but got %d", len(found))
+
+	if len(films) != len(expectedFilms) {
+		t.Errorf("Expected %d films, got %d", len(expectedFilms), len(films))
+	}
+
+	for i, film := range films {
+		if film.FilmID != expectedFilms[i].FilmID {
+			t.Errorf("Expected FilmID %d, got %d", expectedFilms[i].FilmID, film.FilmID)
+		}
+		if film.Title != expectedFilms[i].Title {
+			t.Errorf("Expected Title %s, got %s", expectedFilms[i].Title, film.Title)
+		}
+		if film.ReleaseYear != expectedFilms[i].ReleaseYear {
+			t.Errorf("Expected ReleaseYear %d, got %d", expectedFilms[i].ReleaseYear, film.ReleaseYear)
+		}
+		if film.Length != expectedFilms[i].Length {
+			t.Errorf("Expected Length %d, got %d", expectedFilms[i].Length, film.Length)
+		}
+		if film.CategoryID != expectedFilms[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedFilms[i].CategoryID, film.CategoryID)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
+	}
+}
+
+func TestFilmRepository_FindByActor(t *testing.T) {
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected films
+	expectedFilms := []entity.Film{
+		{
+			FilmID:      1,
+			Title:       "The Matrix",
+			ReleaseYear: 1999,
+			Length:      136,
+			CategoryID:  1,
+		},
+		{
+			FilmID:      2,
+			Title:       "The Matrix Reloaded",
+			ReleaseYear: 2003,
+			Length:      138,
+			CategoryID:  1,
+		},
+	}
+	expectedFilms[0].ID = 1
+	expectedFilms[0].CreatedAt = time.Now()
+	expectedFilms[0].UpdatedAt = time.Now()
+	expectedFilms[1].ID = 2
+	expectedFilms[1].CreatedAt = time.Now()
+	expectedFilms[1].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"})
+	for _, film := range expectedFilms {
+		rows.AddRow(film.ID, film.CreatedAt, film.UpdatedAt, nil, film.FilmID, film.Title, film.ReleaseYear, film.Length, film.CategoryID)
+	}
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(1).
+		WillReturnRows(rows)
+
+	films, err := repo.FindByActor(context.Background(), 1)
+	if err != nil {
+		t.Errorf("Error finding films by actor: %v", err)
+	}
+
+	if len(films) != len(expectedFilms) {
+		t.Errorf("Expected %d films, got %d", len(expectedFilms), len(films))
+	}
+
+	for i, film := range films {
+		if film.FilmID != expectedFilms[i].FilmID {
+			t.Errorf("Expected FilmID %d, got %d", expectedFilms[i].FilmID, film.FilmID)
+		}
+		if film.Title != expectedFilms[i].Title {
+			t.Errorf("Expected Title %s, got %s", expectedFilms[i].Title, film.Title)
+		}
+		if film.ReleaseYear != expectedFilms[i].ReleaseYear {
+			t.Errorf("Expected ReleaseYear %d, got %d", expectedFilms[i].ReleaseYear, film.ReleaseYear)
+		}
+		if film.Length != expectedFilms[i].Length {
+			t.Errorf("Expected Length %d, got %d", expectedFilms[i].Length, film.Length)
+		}
+		if film.CategoryID != expectedFilms[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedFilms[i].CategoryID, film.CategoryID)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestFilmRepository_FindByReleaseYear(t *testing.T) {
-	db := setupFilmTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Define expected films
+	expectedFilms := []entity.Film{
+		{
+			FilmID:      1,
+			Title:       "The Matrix",
+			ReleaseYear: 1999,
+			Length:      136,
+			CategoryID:  1,
+		},
+	}
+	expectedFilms[0].ID = 1
+	expectedFilms[0].CreatedAt = time.Now()
+	expectedFilms[0].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "film_id", "title", "release_year", "length", "category_id"})
+	for _, film := range expectedFilms {
+		rows.AddRow(film.ID, film.CreatedAt, film.UpdatedAt, nil, film.FilmID, film.Title, film.ReleaseYear, film.Length, film.CategoryID)
 	}
 
-	repo := NewFilmRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WithArgs(int16(1999)).
+		WillReturnRows(rows)
 
-	// Create a test category
-	category := createTestCategory(t, db, "Various")
-
-	// Create test films
-	createTestFilm(t, db, "Film 2020", 2020, 100, category.CategoryID)
-	createTestFilm(t, db, "Film 2021", 2021, 110, category.CategoryID)
-	createTestFilm(t, db, "Another Film 2021", 2021, 120, category.CategoryID)
-
-	// Test FindByReleaseYear method
-	found, err := repo.FindByReleaseYear(ctx, 2021)
+	films, err := repo.FindByReleaseYear(context.Background(), 1999)
 	if err != nil {
-		t.Errorf("Failed to find films by release year: %v", err)
-		return
+		t.Errorf("Error finding films by release year: %v", err)
 	}
-	if len(found) != 2 {
-		t.Errorf("Expected to find 2 films, but got %d", len(found))
+
+	if len(films) != len(expectedFilms) {
+		t.Errorf("Expected %d films, got %d", len(expectedFilms), len(films))
+	}
+
+	for i, film := range films {
+		if film.FilmID != expectedFilms[i].FilmID {
+			t.Errorf("Expected FilmID %d, got %d", expectedFilms[i].FilmID, film.FilmID)
+		}
+		if film.Title != expectedFilms[i].Title {
+			t.Errorf("Expected Title %s, got %s", expectedFilms[i].Title, film.Title)
+		}
+		if film.ReleaseYear != expectedFilms[i].ReleaseYear {
+			t.Errorf("Expected ReleaseYear %d, got %d", expectedFilms[i].ReleaseYear, film.ReleaseYear)
+		}
+		if film.Length != expectedFilms[i].Length {
+			t.Errorf("Expected Length %d, got %d", expectedFilms[i].Length, film.Length)
+		}
+		if film.CategoryID != expectedFilms[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedFilms[i].CategoryID, film.CategoryID)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
+	}
+}
+
+func TestFilmRepository_FindByID_NotFound(t *testing.T) {
+	_, mock, repo, cleanup := setupFilmTest(t)
+	defer cleanup()
+
+	// Expect the SELECT query with no results
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `film` WHERE `film`.`id` = ? AND `film`.`deleted_at` IS NULL ORDER BY `film`.`id` LIMIT ?")).
+		WithArgs(999, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := repo.FindByID(context.Background(), 999)
+	if err == nil {
+		t.Error("Expected error when film not found, got nil")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }

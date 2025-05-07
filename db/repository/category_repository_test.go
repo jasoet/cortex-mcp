@@ -3,277 +3,314 @@ package repository
 import (
 	"CortexMCP/db/entity"
 	"context"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-	"log"
-	"os"
+	"database/sql"
+	"regexp"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
-func setupTestDB(t *testing.T) *gorm.DB {
-	// Configure logger for GORM
-	newLogger := logger.New(
-		log.New(os.Stdout, "\r\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold: time.Second,
-			LogLevel:      logger.Silent,
-			Colorful:      false,
-		},
-	)
+func setupCategoryTest(t *testing.T) (*sql.DB, sqlmock.Sqlmock, CategoryRepository, func()) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to open sqlmock database: %v", err)
+	}
 
-	// Connect to test database
-	// Using MySQL for testing - adjust connection string as needed
-	dsn := "root:password@tcp(127.0.0.1:3306)/test_db?charset=utf8mb4&parseTime=True&loc=Local"
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: newLogger,
+	dialector := mysql.New(mysql.Config{
+		Conn:                      db,
+		SkipInitializeWithVersion: true,
 	})
+
+	gormDB, err := gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
-		t.Skipf("Skipping test: Failed to connect to test database: %v", err)
-		return nil
+		t.Fatalf("Failed to open gorm database: %v", err)
 	}
 
-	// Auto migrate the schema
-	err = db.AutoMigrate(&entity.Category{})
-	if err != nil {
-		t.Fatalf("Failed to migrate schema: %v", err)
+	repo := NewCategoryRepository(gormDB)
+
+	return db, mock, repo, func() {
+		db.Close()
 	}
-
-	// Clean up any existing data
-	db.Exec("DELETE FROM category")
-
-	return db
 }
 
 func TestCategoryRepository_Create(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
-
-	// Create a test category
 	category := &entity.Category{
 		Name: "Action",
 	}
 
-	// Test Create method
-	err := repo.Create(ctx, category)
+	// Expect the INSERT query
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `category`")).
+		WithArgs(
+			sqlmock.AnyArg(), // CreatedAt
+			sqlmock.AnyArg(), // UpdatedAt
+			sqlmock.AnyArg(), // DeletedAt
+			category.Name,    // Name
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := repo.Create(context.Background(), category)
 	if err != nil {
-		t.Errorf("Failed to create category: %v", err)
+		t.Errorf("Error creating category: %v", err)
 	}
-	if category.CategoryID == 0 {
-		t.Error("Expected CategoryID to be non-zero after creation")
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_FindByID(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
-
-	// Create a test category
-	category := &entity.Category{
-		Name: "Comedy",
+	// Define expected category
+	expectedCategory := entity.Category{
+		CategoryID: 1,
+		Name:       "Action",
 	}
-	err := repo.Create(ctx, category)
+	expectedCategory.ID = 1
+	expectedCategory.CreatedAt = time.Now()
+	expectedCategory.UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "category_id", "name"}).
+		AddRow(expectedCategory.ID, expectedCategory.CreatedAt, expectedCategory.UpdatedAt, nil, expectedCategory.CategoryID, expectedCategory.Name)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `category` WHERE `category`.`id` = ? AND `category`.`deleted_at` IS NULL ORDER BY `category`.`id` LIMIT ?")).
+		WithArgs(1, 1).
+		WillReturnRows(rows)
+
+	category, err := repo.FindByID(context.Background(), 1)
 	if err != nil {
-		t.Errorf("Failed to create category: %v", err)
-		return
+		t.Errorf("Error finding category: %v", err)
 	}
 
-	// Test FindByID method
-	found, err := repo.FindByID(ctx, category.CategoryID)
-	if err != nil {
-		t.Errorf("Failed to find category by ID: %v", err)
-		return
+	if category.CategoryID != expectedCategory.CategoryID {
+		t.Errorf("Expected CategoryID %d, got %d", expectedCategory.CategoryID, category.CategoryID)
 	}
-	if found == nil {
-		t.Error("Expected to find category, but got nil")
-		return
+
+	if category.Name != expectedCategory.Name {
+		t.Errorf("Expected Name %s, got %s", expectedCategory.Name, category.Name)
 	}
-	if found.Name != category.Name {
-		t.Errorf("Expected category name %s, but got %s", category.Name, found.Name)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_FindAll(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
+
+	// Define expected categories
+	expectedCategories := []entity.Category{
+		{
+			CategoryID: 1,
+			Name:       "Action",
+		},
+		{
+			CategoryID: 2,
+			Name:       "Comedy",
+		},
+	}
+	expectedCategories[0].ID = 1
+	expectedCategories[0].CreatedAt = time.Now()
+	expectedCategories[0].UpdatedAt = time.Now()
+	expectedCategories[1].ID = 2
+	expectedCategories[1].CreatedAt = time.Now()
+	expectedCategories[1].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "category_id", "name"})
+	for _, category := range expectedCategories {
+		rows.AddRow(category.ID, category.CreatedAt, category.UpdatedAt, nil, category.CategoryID, category.Name)
 	}
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WillReturnRows(rows)
 
-	// Create test categories
-	categories := []*entity.Category{
-		{Name: "Drama"},
-		{Name: "Horror"},
-		{Name: "Sci-Fi"},
+	categories, err := repo.FindAll(context.Background())
+	if err != nil {
+		t.Errorf("Error finding categories: %v", err)
 	}
 
-	for _, cat := range categories {
-		err := repo.Create(ctx, cat)
-		if err != nil {
-			t.Errorf("Failed to create category: %v", err)
-			return
+	if len(categories) != len(expectedCategories) {
+		t.Errorf("Expected %d categories, got %d", len(expectedCategories), len(categories))
+	}
+
+	for i, category := range categories {
+		if category.CategoryID != expectedCategories[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedCategories[i].CategoryID, category.CategoryID)
+		}
+		if category.Name != expectedCategories[i].Name {
+			t.Errorf("Expected Name %s, got %s", expectedCategories[i].Name, category.Name)
 		}
 	}
 
-	// Test FindAll method
-	found, err := repo.FindAll(ctx)
-	if err != nil {
-		t.Errorf("Failed to find all categories: %v", err)
-		return
-	}
-	if len(found) != len(categories) {
-		t.Errorf("Expected to find %d categories, but got %d", len(categories), len(found))
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_Update(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
-
-	// Create a test category
 	category := &entity.Category{
-		Name: "Adventure",
+		CategoryID: 1,
+		Name:       "Action",
 	}
-	err := repo.Create(ctx, category)
+	category.ID = 1
+
+	// Expect the UPDATE query
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(),    // CreatedAt
+			sqlmock.AnyArg(),    // UpdatedAt
+			sqlmock.AnyArg(),    // DeletedAt
+			category.Name,       // Name
+			category.ID,         // ID
+			category.CategoryID, // CategoryID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := repo.Update(context.Background(), category)
 	if err != nil {
-		t.Errorf("Failed to create category: %v", err)
-		return
+		t.Errorf("Error updating category: %v", err)
 	}
 
-	// Update the category
-	category.Name = "Updated Adventure"
-	err = repo.Update(ctx, category)
-	if err != nil {
-		t.Errorf("Failed to update category: %v", err)
-		return
-	}
-
-	// Verify the update
-	found, err := repo.FindByID(ctx, category.CategoryID)
-	if err != nil {
-		t.Errorf("Failed to find category by ID: %v", err)
-		return
-	}
-	if found.Name != "Updated Adventure" {
-		t.Errorf("Expected category name 'Updated Adventure', but got '%s'", found.Name)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_Delete(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
-
-	// Create a test category
 	category := &entity.Category{
-		Name: "Documentary",
+		CategoryID: 1,
+		Name:       "Action",
 	}
-	err := repo.Create(ctx, category)
+	category.ID = 1
+
+	// Expect the DELETE query (soft delete)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(), // DeletedAt
+			category.ID,
+			category.CategoryID,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := repo.Delete(context.Background(), category)
 	if err != nil {
-		t.Errorf("Failed to create category: %v", err)
-		return
+		t.Errorf("Error deleting category: %v", err)
 	}
 
-	// Delete the category
-	err = repo.Delete(ctx, category)
-	if err != nil {
-		t.Errorf("Failed to delete category: %v", err)
-		return
-	}
-
-	// Verify the deletion
-	_, err = repo.FindByID(ctx, category.CategoryID)
-	if err == nil {
-		t.Error("Expected error when finding deleted category, but got nil")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_DeleteByID(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
-	}
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
+	// Expect the DELETE query (soft delete)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE").
+		WithArgs(
+			sqlmock.AnyArg(), // DeletedAt
+			1,                // ID
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
-	// Create a test category
-	category := &entity.Category{
-		Name: "Animation",
-	}
-	err := repo.Create(ctx, category)
+	err := repo.DeleteByID(context.Background(), 1)
 	if err != nil {
-		t.Errorf("Failed to create category: %v", err)
-		return
+		t.Errorf("Error deleting category by ID: %v", err)
 	}
 
-	// Delete the category by ID
-	err = repo.DeleteByID(ctx, category.CategoryID)
-	if err != nil {
-		t.Errorf("Failed to delete category by ID: %v", err)
-		return
-	}
-
-	// Verify the deletion
-	_, err = repo.FindByID(ctx, category.CategoryID)
-	if err == nil {
-		t.Error("Expected error when finding deleted category, but got nil")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
 
 func TestCategoryRepository_FindByName(t *testing.T) {
-	db := setupTestDB(t)
-	if db == nil {
-		return // Skip test if database connection failed
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
+
+	// Define expected categories
+	expectedCategories := []entity.Category{
+		{
+			CategoryID: 1,
+			Name:       "Action",
+		},
+	}
+	expectedCategories[0].ID = 1
+	expectedCategories[0].CreatedAt = time.Now()
+	expectedCategories[0].UpdatedAt = time.Now()
+
+	// Expect the SELECT query
+	rows := sqlmock.NewRows([]string{"id", "created_at", "updated_at", "deleted_at", "category_id", "name"})
+	for _, category := range expectedCategories {
+		rows.AddRow(category.ID, category.CreatedAt, category.UpdatedAt, nil, category.CategoryID, category.Name)
 	}
 
-	repo := NewCategoryRepository(db)
-	ctx := context.Background()
+	mock.ExpectQuery("SELECT").
+		WithArgs("%Action%").
+		WillReturnRows(rows)
 
-	// Create test categories
-	categories := []*entity.Category{
-		{Name: "Action"},
-		{Name: "Action Adventure"},
-		{Name: "Comedy"},
+	categories, err := repo.FindByName(context.Background(), "Action")
+	if err != nil {
+		t.Errorf("Error finding categories by name: %v", err)
 	}
 
-	for _, cat := range categories {
-		err := repo.Create(ctx, cat)
-		if err != nil {
-			t.Errorf("Failed to create category: %v", err)
-			return
+	if len(categories) != len(expectedCategories) {
+		t.Errorf("Expected %d categories, got %d", len(expectedCategories), len(categories))
+	}
+
+	for i, category := range categories {
+		if category.CategoryID != expectedCategories[i].CategoryID {
+			t.Errorf("Expected CategoryID %d, got %d", expectedCategories[i].CategoryID, category.CategoryID)
+		}
+		if category.Name != expectedCategories[i].Name {
+			t.Errorf("Expected Name %s, got %s", expectedCategories[i].Name, category.Name)
 		}
 	}
 
-	// Test FindByName method
-	found, err := repo.FindByName(ctx, "Action")
-	if err != nil {
-		t.Errorf("Failed to find categories by name: %v", err)
-		return
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
-	if len(found) != 2 {
-		t.Errorf("Expected to find 2 categories, but got %d", len(found))
+}
+
+func TestCategoryRepository_FindByID_NotFound(t *testing.T) {
+	_, mock, repo, cleanup := setupCategoryTest(t)
+	defer cleanup()
+
+	// Expect the SELECT query with no results
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `category` WHERE `category`.`id` = ? AND `category`.`deleted_at` IS NULL ORDER BY `category`.`id` LIMIT ?")).
+		WithArgs(999, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := repo.FindByID(context.Background(), 999)
+	if err == nil {
+		t.Error("Expected error when category not found, got nil")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
 	}
 }
